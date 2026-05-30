@@ -1,0 +1,4 @@
+opencv-python-headless>=4.9
+ultralytics>=8.2
+flask>=3.0
+numpy>=1.26

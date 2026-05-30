@@ -1,0 +1,37 @@
+{% extends "base.html" %}
+{% block title_suffix %} — Clips{% endblock %}
+
+{% block content %}
+<section class="clips-section">
+  <h1>Saved Clips</h1>
+  {% if clips %}
+  <div class="clip-grid">
+    {% for clip in clips %}
+    <div class="clip-card">
+      <a href="/clips/{{ clip.filename }}">
+        <img src="/clips/{{ clip.thumb }}" alt="Thumbnail" loading="lazy"
+             onerror="this.src='/static/img/no-thumb.svg'">
+      </a>
+      <div class="clip-meta">
+        <div class="clip-name">{{ clip.filename }}</div>
+        <div class="clip-info">{{ clip.duration }}s &bull; {{ clip.size_mb }} MB</div>
+        <a class="btn-download" href="/clips/{{ clip.filename }}" download>&#8595; Download</a>
+      </div>
+    </div>
+    {% endfor %}
+  </div>
+
+  <div class="pagination">
+    {% if page > 1 %}
+    <a href="/clips?page={{ page - 1 }}">&larr; Newer</a>
+    {% endif %}
+    <span>Page {{ page }} / {{ total_pages }}</span>
+    {% if page < total_pages %}
+    <a href="/clips?page={{ page + 1 }}">Older &rarr;</a>
+    {% endif %}
+  </div>
+  {% else %}
+  <p class="empty">No clips yet. Clips appear here as soon as the system detects a ball.</p>
+  {% endif %}
+</section>
+{% endblock %}
