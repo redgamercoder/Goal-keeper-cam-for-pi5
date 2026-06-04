@@ -66,8 +66,8 @@ def build_config() -> tuple[Config, str]:
                    help="Run the web dashboard (--no-dashboard to disable)")
     p.add_argument("--dashboard-port", type=int, default=cfg.dashboard_port,
                    help="Dashboard port")
-    p.add_argument("--mode", choices=["motion", "ball"], default="motion",
-                   help="Detection mode (ball/YOLO not implemented yet)")
+    p.add_argument("--mode", choices=["motion", "ball"], default=cfg.detection_mode,
+                   help="Detection mode: 'motion' (frame-diff) or 'ball' (YOLO/NCNN)")
     args = p.parse_args()
 
     cfg.output = args.output

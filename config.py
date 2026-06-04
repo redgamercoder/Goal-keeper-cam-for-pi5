@@ -37,6 +37,12 @@ class Config:
     dashboard_port: int = 8080
     max_disk_usage_gb: float = 20.0   # stop recording when clips dir exceeds this
 
+    # --- YOLO ball detection (only used when mode == "ball") ---
+    detection_mode: str = "motion"    # "motion" or "ball"
+    confidence_threshold: float = 0.45
+    ncnn_model_param: str = "./models/yolov8s_ncnn_model/model.ncnn.param"
+    ncnn_model_bin: str = "./models/yolov8s_ncnn_model/model.ncnn.bin"
+
     @classmethod
     def load(cls, path: str = "config.json") -> "Config":
         """Build a Config from defaults, overlaying config.json if present."""

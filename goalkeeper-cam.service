@@ -7,7 +7,7 @@ Wants=network-online.target
 Type=simple
 User=williampatrickconnell
 WorkingDirectory=/home/williampatrickconnell/Goal-keeper-cam-for-pi5
-ExecStart=/usr/bin/python3 /home/williampatrickconnell/Goal-keeper-cam-for-pi5/goalkeeper_cam.py
+ExecStart=/usr/bin/python3 /home/williampatrickconnell/Goal-keeper-cam-for-pi5/goalkeeper_cam.py --mode motion
 Restart=on-failure
 RestartSec=5
 

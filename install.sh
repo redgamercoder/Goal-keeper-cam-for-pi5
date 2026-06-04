@@ -3,7 +3,9 @@
 # Goalkeeper Cam installer for Raspberry Pi 5 (Raspberry Pi OS Bookworm 64-bit).
 # Idempotent: safe to run again any time. Run with sudo:
 #
-#     sudo ./install.sh
+#     sudo ./install.sh            # base install (motion detection)
+#     sudo ./install.sh --yolo     # base install + one-time YOLO ball-mode setup
+#     sudo ./install.sh --mode ball  # same as --yolo
 #
 set -euo pipefail
 
@@ -12,6 +14,20 @@ PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 RUN_USER="williampatrickconnell"
 SERVICE="goalkeeper-cam"
 UNIT_PATH="/etc/systemd/system/${SERVICE}.service"
+
+# --- parse args -------------------------------------------------------------
+WANT_YOLO=0
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --yolo) WANT_YOLO=1 ;;
+    --mode) shift; [[ "${1:-}" == "ball" ]] && WANT_YOLO=1 ;;
+    --mode=ball) WANT_YOLO=1 ;;
+    -h|--help)
+      echo "Usage: sudo ./install.sh [--yolo | --mode ball]"; exit 0 ;;
+    *) echo "Unknown argument: $1" >&2; exit 1 ;;
+  esac
+  shift
+done
 
 if [[ $EUID -ne 0 ]]; then
   echo "Please run with sudo: sudo ./install.sh" >&2
@@ -60,6 +76,44 @@ echo "==> Creating clips directory..."
 mkdir -p "$PROJECT_DIR/clips"
 chown -R "$RUN_USER":"$RUN_USER" "$PROJECT_DIR/clips"
 
+# --- 5b. optional: YOLO ball-detection setup (one-time, ~5 min) -------------
+setup_yolo() {
+  echo "==> [YOLO] Installing ultralytics + ncnn (one-time)..."
+  pip install --break-system-packages ultralytics ncnn
+
+  echo "==> [YOLO] Exporting YOLOv8s to NCNN."
+  echo "           This takes ~5 minutes on a Pi 5 and is NOT frozen:"
+  echo "           it downloads the weights, then converts them to NCNN."
+  ( cd "$PROJECT_DIR" && python3 - <<'PY'
+from ultralytics import YOLO
+print("[YOLO] Loading/downloading yolov8s.pt ...", flush=True)
+model = YOLO("yolov8s.pt")
+print("[YOLO] Exporting to NCNN (the slow part - please wait) ...", flush=True)
+model.export(format="ncnn")
+print("[YOLO] Export finished.", flush=True)
+PY
+  )
+
+  mkdir -p "$PROJECT_DIR/models"
+  if [[ -d "$PROJECT_DIR/yolov8s_ncnn_model" ]]; then
+    rm -rf "$PROJECT_DIR/models/yolov8s_ncnn_model"
+    mv "$PROJECT_DIR/yolov8s_ncnn_model" "$PROJECT_DIR/models/"
+  fi
+  chown -R "$RUN_USER":"$RUN_USER" "$PROJECT_DIR/models"
+
+  if [[ -f "$PROJECT_DIR/models/yolov8s_ncnn_model/model.ncnn.param" \
+     && -f "$PROJECT_DIR/models/yolov8s_ncnn_model/model.ncnn.bin" ]]; then
+    echo "YOLO model ready"
+  else
+    echo "ERROR: YOLO export did not produce the expected NCNN files." >&2
+    exit 1
+  fi
+}
+
+if [[ $WANT_YOLO -eq 1 ]]; then
+  setup_yolo
+fi
+
 # --- 6. install + enable systemd service ------------------------------------
 echo "==> Installing systemd service..."
 cat > "$UNIT_PATH" <<EOF
@@ -72,7 +126,7 @@ Wants=network-online.target
 Type=simple
 User=${RUN_USER}
 WorkingDirectory=${PROJECT_DIR}
-ExecStart=/usr/bin/python3 ${PROJECT_DIR}/goalkeeper_cam.py
+ExecStart=/usr/bin/python3 ${PROJECT_DIR}/goalkeeper_cam.py --mode motion
 Restart=on-failure
 RestartSec=5
 
