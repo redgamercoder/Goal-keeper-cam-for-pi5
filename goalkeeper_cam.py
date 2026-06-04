@@ -1,193 +1,188 @@
 #!/usr/bin/env python3
 """
-Goal Keeper Cam for Raspberry Pi 5
-==================================
+Goalkeeper Cam for Raspberry Pi 5
+=================================
 
-A simple motion-triggered recording camera intended to capture goalkeeper
-action clips. Designed for the Raspberry Pi 5 with the Pi Camera Module
-(using Picamera2) but falls back to OpenCV/USB webcams on other hardware
-(including your Mac for testing).
+Motion-triggered camera that records goalkeeper training clips, with a bright
+phone-friendly web dashboard for live preview and clip playback.
 
-Usage:
-    python3 goalkeeper_cam.py                 # run with defaults
-    python3 goalkeeper_cam.py --output clips  # save clips to ./clips
-    python3 goalkeeper_cam.py --sensitivity 30 --preroll 3 --postroll 4
+    python3 goalkeeper_cam.py                 # run with defaults (+dashboard)
+    python3 goalkeeper_cam.py --no-dashboard  # headless capture only
+    python3 goalkeeper_cam.py --help          # all options
 
-Press Ctrl+C to stop.
-
-Dependencies:
-    pip install opencv-python numpy
-    # On the Pi (recommended for the CSI camera):
-    sudo apt install -y python3-picamera2
+Backends auto-detect: Picamera2 (CSI Camera Module 3) is preferred, OpenCV
+(USB webcam, or your Mac for testing) is the fallback. See README.md.
 """
 
+from __future__ import annotations
+
 import argparse
-import collections
-import datetime as dt
+import logging
+import logging.handlers
 import os
+import signal
 import sys
 import time
 
-import numpy as np
+from config import Config
+from state import AppState
+from camera import Camera
+from motion import make_detector
+from recorder import Recorder
+from dashboard import start_dashboard
 
-try:
-    import cv2
-except ImportError:
-    sys.exit("OpenCV is required. Install with: pip install opencv-python")
+log = logging.getLogger("gkcam")
 
 
-def parse_args():
-    p = argparse.ArgumentParser(description="Motion-triggered goalkeeper camera")
-    p.add_argument("--output", default="clips", help="Directory to save clips")
-    p.add_argument("--width", type=int, default=1280, help="Frame width")
-    p.add_argument("--height", type=int, default=720, help="Frame height")
-    p.add_argument("--fps", type=int, default=30, help="Recording frame rate")
-    p.add_argument("--sensitivity", type=int, default=25,
+# ---------------------------------------------------------------------------
+# CLI  (config.json defaults < command-line flags)
+# ---------------------------------------------------------------------------
+def build_config() -> tuple[Config, str]:
+    cfg = Config.load()   # defaults overlaid with config.json
+    p = argparse.ArgumentParser(
+        description="Motion-triggered goalkeeper camera for the Raspberry Pi 5",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
+    # --- original prototype flags (kept identical) ---
+    p.add_argument("--output", default=cfg.output, help="Directory to save clips")
+    p.add_argument("--width", type=int, default=cfg.width, help="Frame width")
+    p.add_argument("--height", type=int, default=cfg.height, help="Frame height")
+    p.add_argument("--fps", type=int, default=cfg.fps, help="Recording frame rate")
+    p.add_argument("--sensitivity", type=int, default=cfg.sensitivity,
                    help="Motion threshold (lower = more sensitive)")
-    p.add_argument("--min-area", type=int, default=1500,
+    p.add_argument("--min-area", type=int, default=cfg.min_area,
                    help="Minimum changed-pixel area to count as motion")
-    p.add_argument("--preroll", type=float, default=2.0,
-                   help="Seconds of footage to keep before motion starts")
-    p.add_argument("--postroll", type=float, default=3.0,
+    p.add_argument("--preroll", type=float, default=cfg.preroll,
+                   help="Seconds of footage kept before motion starts")
+    p.add_argument("--postroll", type=float, default=cfg.postroll,
                    help="Seconds to keep recording after motion stops")
-    p.add_argument("--camera", type=int, default=0, help="USB/OpenCV camera index")
-    p.add_argument("--show", action="store_true", help="Show a live preview window")
-    return p.parse_args()
+    p.add_argument("--camera", type=int, default=cfg.camera,
+                   help="USB/OpenCV camera index")
+    p.add_argument("--show", action="store_true", default=cfg.show,
+                   help="Show a local GUI preview window (off-Pi testing)")
+    # --- new flags ---
+    p.add_argument("--dashboard", action=argparse.BooleanOptionalAction,
+                   default=cfg.dashboard_enabled,
+                   help="Run the web dashboard (--no-dashboard to disable)")
+    p.add_argument("--dashboard-port", type=int, default=cfg.dashboard_port,
+                   help="Dashboard port")
+    p.add_argument("--mode", choices=["motion", "ball"], default="motion",
+                   help="Detection mode (ball/YOLO not implemented yet)")
+    args = p.parse_args()
+
+    cfg.output = args.output
+    cfg.width = args.width
+    cfg.height = args.height
+    cfg.fps = args.fps
+    cfg.sensitivity = args.sensitivity
+    cfg.min_area = args.min_area
+    cfg.preroll = args.preroll
+    cfg.postroll = args.postroll
+    cfg.camera = args.camera
+    cfg.show = args.show
+    cfg.dashboard_enabled = args.dashboard
+    cfg.dashboard_port = args.dashboard_port
+    return cfg, args.mode
 
 
-class Camera:
-    """Thin wrapper that prefers Picamera2 on the Pi, OpenCV elsewhere."""
+# ---------------------------------------------------------------------------
+# Logging: stdout (journalctl) + rotating file in the project dir
+# ---------------------------------------------------------------------------
+def setup_logging() -> None:
+    here = os.path.dirname(os.path.abspath(__file__))
+    fmt = logging.Formatter("%(asctime)s %(name)s %(levelname)s %(message)s")
 
-    def __init__(self, width, height, fps, index):
-        self.width, self.height, self.fps = width, height, fps
-        self.backend = None
-        self._init_picamera2() or self._init_opencv(index)
+    root = logging.getLogger()
+    root.setLevel(logging.INFO)
 
-    def _init_picamera2(self):
-        try:
-            from picamera2 import Picamera2
-        except ImportError:
-            return False
-        self.picam = Picamera2()
-        config = self.picam.create_video_configuration(
-            main={"size": (self.width, self.height), "format": "RGB888"}
-        )
-        self.picam.configure(config)
-        self.picam.start()
-        time.sleep(1)  # let auto-exposure settle
-        self.backend = "picamera2"
-        print("Using Picamera2 backend (Pi camera)")
-        return True
+    stream = logging.StreamHandler(sys.stdout)
+    stream.setFormatter(fmt)
+    root.addHandler(stream)
 
-    def _init_opencv(self, index):
-        self.cap = cv2.VideoCapture(index)
-        self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.width)
-        self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.height)
-        self.cap.set(cv2.CAP_PROP_FPS, self.fps)
-        if not self.cap.isOpened():
-            sys.exit(f"Could not open camera index {index}")
-        self.backend = "opencv"
-        print("Using OpenCV backend (USB/webcam)")
-        return True
-
-    def read(self):
-        if self.backend == "picamera2":
-            frame = self.picam.capture_array()
-            return True, cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
-        return self.cap.read()
-
-    def release(self):
-        if self.backend == "picamera2":
-            self.picam.stop()
-        else:
-            self.cap.release()
+    file_handler = logging.handlers.RotatingFileHandler(
+        os.path.join(here, "goalkeeper-cam.log"),
+        maxBytes=2_000_000, backupCount=3,
+    )
+    file_handler.setFormatter(fmt)
+    root.addHandler(file_handler)
 
 
-def detect_motion(prev_gray, gray, sensitivity, min_area):
-    delta = cv2.absdiff(prev_gray, gray)
-    thresh = cv2.threshold(delta, sensitivity, 255, cv2.THRESH_BINARY)[1]
-    thresh = cv2.dilate(thresh, None, iterations=2)
-    contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL,
-                                   cv2.CHAIN_APPROX_SIMPLE)
-    return any(cv2.contourArea(c) >= min_area for c in contours)
+# ---------------------------------------------------------------------------
+# Main capture loop
+# ---------------------------------------------------------------------------
+def main() -> None:
+    cfg, mode = build_config()
+    setup_logging()
+    log.info("Goalkeeper Cam starting (mode=%s, dashboard=%s)",
+             mode, cfg.dashboard_enabled)
 
+    state = AppState()
+    detector = make_detector(mode, cfg)
+    camera = Camera(cfg, state)
+    recorder = Recorder(cfg, state)
 
-def new_writer(output_dir, width, height, fps):
-    os.makedirs(output_dir, exist_ok=True)
-    stamp = dt.datetime.now().strftime("%Y%m%d_%H%M%S")
-    path = os.path.join(output_dir, f"save_{stamp}.mp4")
-    fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-    writer = cv2.VideoWriter(path, fourcc, fps, (width, height))
-    print(f"Recording -> {path}")
-    return writer, path
+    # graceful shutdown for `systemctl stop` (SIGTERM) and Ctrl+C (SIGINT)
+    stop = {"flag": False}
 
+    def handle_signal(signum, _frame):
+        log.info("Signal %s received; shutting down...", signum)
+        stop["flag"] = True
 
-def main():
-    args = parse_args()
-    cam = Camera(args.width, args.height, args.fps, args.camera)
+    signal.signal(signal.SIGTERM, handle_signal)
+    signal.signal(signal.SIGINT, handle_signal)
 
-    preroll_frames = int(args.preroll * args.fps)
-    postroll_frames = int(args.postroll * args.fps)
-    buffer = collections.deque(maxlen=preroll_frames)
+    if cfg.dashboard_enabled:
+        start_dashboard(cfg, state)
 
-    prev_gray = None
-    writer = None
-    idle_count = 0
+    fail_count = 0
+    last = time.time()
+    fps_ema: float | None = None
 
-    print("Watching for motion. Press Ctrl+C to stop.")
     try:
-        while True:
-            ok, frame = cam.read()
-            if not ok:
-                print("Frame grab failed, retrying...")
-                time.sleep(0.05)
+        while not stop["flag"]:
+            ok, frame = camera.read()
+            if not ok or frame is None:
+                fail_count += 1
+                log.warning("Frame grab failed (%d in a row)", fail_count)
+                if fail_count >= 30:        # ~a few seconds of failures
+                    camera.reinit()
+                    state.backend = camera.backend or "unknown"
+                    fail_count = 0
+                time.sleep(0.1)
                 continue
+            fail_count = 0
 
-            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-            gray = cv2.GaussianBlur(gray, (21, 21), 0)
+            # rolling FPS estimate
+            now = time.time()
+            dt_ = now - last
+            last = now
+            if dt_ > 0:
+                inst = 1.0 / dt_
+                fps_ema = inst if fps_ema is None else 0.9 * fps_ema + 0.1 * inst
+                state.fps = fps_ema
 
-            moved = False
-            if prev_gray is not None:
-                moved = detect_motion(prev_gray, gray,
-                                      args.sensitivity, args.min_area)
-            prev_gray = gray
+            moved = detector.detect(frame)
+            recorder.update(frame, moved)
 
-            buffer.append(frame)
+            if cfg.dashboard_enabled:
+                state.update_preview(frame)
 
-            if moved:
-                if writer is None:
-                    writer, _ = new_writer(args.output, args.width,
-                                           args.height, args.fps)
-                    for buffered in buffer:  # flush the pre-roll
-                        writer.write(buffered)
-                idle_count = 0
-            elif writer is not None:
-                idle_count += 1
-
-            if writer is not None:
-                writer.write(frame)
-                if idle_count >= postroll_frames:
-                    writer.release()
-                    writer = None
-                    buffer.clear()
-                    print("Motion ended, clip saved.")
-
-            if args.show:
-                label = "REC" if writer else "idle"
+            if cfg.show:
+                import cv2
+                label = "REC" if state.status == "RECORDING" else "idle"
+                color = (0, 0, 255) if state.status == "RECORDING" else (0, 255, 0)
                 cv2.putText(frame, label, (12, 32),
-                            cv2.FONT_HERSHEY_SIMPLEX, 1,
-                            (0, 0, 255) if writer else (0, 255, 0), 2)
+                            cv2.FONT_HERSHEY_SIMPLEX, 1, color, 2)
                 cv2.imshow("Goalkeeper Cam", frame)
                 if cv2.waitKey(1) & 0xFF == ord("q"):
                     break
-    except KeyboardInterrupt:
-        print("\nStopping...")
     finally:
-        if writer is not None:
-            writer.release()
-        cam.release()
-        if args.show:
+        recorder.close()
+        camera.release()
+        if cfg.show:
+            import cv2
             cv2.destroyAllWindows()
+        log.info("Stopped cleanly.")
 
 
 if __name__ == "__main__":
