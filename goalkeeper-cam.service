@@ -1,0 +1,15 @@
+[Unit]
+Description=Goalkeeper Cam (motion-triggered camera + dashboard)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=williampatrickconnell
+WorkingDirectory=/home/williampatrickconnell/Goal-keeper-cam-for-pi5
+ExecStart=/usr/bin/python3 /home/williampatrickconnell/Goal-keeper-cam-for-pi5/goalkeeper_cam.py --mode motion
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

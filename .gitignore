@@ -1,0 +1,11 @@
+clips/
+config.json
+*.log
+*.log.*
+__pycache__/
+*.pyc
+
+# YOLO: downloaded weights + exported NCNN model (produced by install.sh --yolo)
+models/
+yolov8s.pt
+*_ncnn_model/

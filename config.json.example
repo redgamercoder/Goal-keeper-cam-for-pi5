@@ -1,0 +1,19 @@
+{
+  "output": "clips",
+  "width": 1280,
+  "height": 720,
+  "fps": 30,
+  "sensitivity": 25,
+  "min_area": 1500,
+  "preroll": 2.0,
+  "postroll": 3.0,
+  "camera": 0,
+  "show": false,
+  "dashboard_enabled": true,
+  "dashboard_port": 8080,
+  "max_disk_usage_gb": 20.0,
+  "detection_mode": "motion",
+  "confidence_threshold": 0.45,
+  "ncnn_model_param": "./models/yolov8s_ncnn_model/model.ncnn.param",
+  "ncnn_model_bin": "./models/yolov8s_ncnn_model/model.ncnn.bin"
+}
